@@ -33,6 +33,8 @@ type App struct {
 
 	drawnPixels []rl.Vector2
 	drawRadius  float32
+
+	lastDrawnPixel rl.Vector2
 }
 
 func (a *App) Init() {
@@ -121,10 +123,37 @@ func (a *App) OnMousePress() {
 	case AppStateDrawStart:
 		if rl.IsMouseButtonDown(rl.MouseButtonLeft) {
 			a.currentAppState = AppStateDrawing
+		} else {
+			a.lastDrawnPixel = rl.NewVector2(a.mouseX, a.mouseY)
 		}
 	case AppStateDrawing:
 		if rl.IsMouseButtonDown(rl.MouseButtonLeft) {
-			a.drawnPixels = append(a.drawnPixels, rl.NewVector2(a.mouseX, a.mouseY))
+			cur := rl.NewVector2(a.mouseX, a.mouseY)
+
+			dx := cur.X - a.lastDrawnPixel.X
+			dy := cur.Y - a.lastDrawnPixel.Y
+			dist := rl.Vector2Length(rl.NewVector2(dx, dy))
+
+			step := a.drawRadius * 0.5
+			if step < 1 {
+				step = 1
+			}
+
+			steps := int(dist / step)
+			if steps < 1 {
+				steps = 1
+			}
+
+			for i := 1; i <= steps; i++ {
+				t := float32(i) / float32(steps)
+				x := a.lastDrawnPixel.X + dx*t
+				y := a.lastDrawnPixel.Y + dy*t
+				a.drawnPixels = append(a.drawnPixels, rl.NewVector2(x, y))
+			}
+
+			a.lastDrawnPixel = cur
+		} else {
+			a.lastDrawnPixel = rl.NewVector2(a.mouseX, a.mouseY)
 		}
 	}
 }
