@@ -1,9 +1,15 @@
 package main
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
+	"log"
+	"net/http"
+	"sync"
 
 	rl "github.com/gen2brain/raylib-go/raylib"
+	"github.com/gorilla/websocket"
 )
 
 type AppState int
@@ -17,6 +23,12 @@ const (
 	AppStateDrawStart           // showing 'Draw Here...' text before anything is drawn
 	AppStateDrawing             // when the user is actively drawing
 )
+
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool { return true },
+}
+
+var clients = make(map[*websocket.Conn]bool)
 
 type FontSet struct {
 	Regular    rl.Font
@@ -38,8 +50,12 @@ type App struct {
 	joinRoomButton      rl.Rectangle
 	joinRoomButtonColor rl.Color
 
+	ws *websocket.Conn
+
 	drawnPixels []rl.Vector2 // store all drawn 'circles' on the screen (not necessarily pixels)
 	drawRadius  float32      // radius of the cirlces drawn
+
+	mu sync.RWMutex
 
 	lastDrawnPixel rl.Vector2 // storing last drawn pixel will help interpolation to smooth drawing lines
 }
@@ -125,9 +141,11 @@ func (a *App) Draw() {
 
 	// actively drawing state, drop prompt and and draw the circles
 	case AppStateDrawing:
+		a.mu.RLock()
 		for _, p := range a.drawnPixels {
 			rl.DrawCircle(int32(p.X), int32(p.Y), a.drawRadius, rl.White)
 		}
+		a.mu.RUnlock()
 
 		// draw mouse pos and label
 		mousePos := fmt.Sprintf("(%.0f, %.0f)", a.mouseX, a.mouseY)
@@ -149,7 +167,10 @@ func (a *App) Update() {
 	// start screen, on space press will enter application, make sure drawn pixels are empty or are reset once visiting menu
 	case AppStateStart:
 		a.OnSpacePressed()
+
+		a.mu.Lock()
 		a.drawnPixels = []rl.Vector2{}
+		a.mu.Unlock()
 
 	case AppStateRoomConfig:
 		a.GetMousePos()
@@ -161,6 +182,10 @@ func (a *App) Update() {
 			// handle click events on 'Join Room' button
 			if rl.IsMouseButtonReleased(rl.MouseButtonLeft) {
 				a.currentAppState = AppStateDrawStart
+
+				go func() {
+					a.JoinWsServer()
+				}()
 			}
 		} else {
 			a.joinRoomButtonColor = rl.White // change button color back to white when no collision
@@ -169,7 +194,18 @@ func (a *App) Update() {
 		// check collisions for 'Make Room Button'
 		if rl.CheckCollisionPointRec(rl.NewVector2(a.mouseX, a.mouseY), a.makeRoomButton) {
 			a.makeRoomButtonColor = rl.Blue // change button color to blue on hover
-			fmt.Println("HOVERED MAKE ROOM!")
+
+			// handle click events on 'Make Room' button
+			if rl.IsMouseButtonReleased(rl.MouseButtonLeft) {
+				a.currentAppState = AppStateDrawStart
+
+				go func() {
+					a.StartWsServer()
+				}()
+				go func() {
+					a.JoinWsServer()
+				}()
+			}
 		} else {
 			a.makeRoomButtonColor = rl.White // change button color back to white when no collision
 		}
@@ -186,6 +222,7 @@ func (a *App) Update() {
 		a.OnMPressed()
 		a.GetMousePos()
 		a.OnMousePress()
+		a.SendDrawingsToWs()
 	}
 }
 
@@ -199,7 +236,9 @@ func (a *App) OnSpacePressed() {
 
 	case AppStateDrawing:
 		if rl.IsKeyPressed(rl.KeySpace) {
+			a.mu.Lock()
 			a.drawnPixels = nil
+			a.mu.Unlock()
 		}
 	}
 }
@@ -251,7 +290,10 @@ func (a *App) OnMousePress() {
 				t := float32(i) / float32(steps)
 				x := a.lastDrawnPixel.X + dx*t
 				y := a.lastDrawnPixel.Y + dy*t
+
+				a.mu.Lock()
 				a.drawnPixels = append(a.drawnPixels, rl.NewVector2(x, y))
+				a.mu.Unlock()
 			}
 
 			a.lastDrawnPixel = cur
@@ -267,6 +309,126 @@ func (a *App) GetMousePos() {
 
 	a.mouseX = mousePos.X
 	a.mouseY = mousePos.Y
+}
+
+func (a *App) HandleConnections(w http.ResponseWriter, r *http.Request) {
+	ws, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer ws.Close()
+
+	clients[ws] = true
+
+	for {
+		_, msg, err := ws.ReadMessage()
+		if err != nil {
+			fmt.Printf("error reading message from ws: %v\n", err)
+			delete(clients, ws)
+			break
+		}
+
+		elemSize := binary.Size(rl.Vector2{})
+		if elemSize <= 0 || len(msg)%elemSize != 0 {
+			fmt.Printf("invalid vector payload size: msg=%d elem=%d\n", len(msg), elemSize)
+			continue
+		}
+
+		count := len(msg) / elemSize
+		vectors := make([]rl.Vector2, count)
+
+		if err := binary.Read(bytes.NewReader(msg), binary.LittleEndian, vectors); err != nil {
+			fmt.Printf("failed to read vector data in ws message: %v\n", err)
+			continue
+		}
+
+		a.mu.Lock()
+		a.drawnPixels = vectors
+		a.mu.Unlock()
+
+		for client := range clients {
+			if err := client.WriteMessage(websocket.BinaryMessage, msg); err != nil {
+				fmt.Printf("error writing message [%s]: %v\n", msg, err)
+				client.Close()
+				delete(clients, client)
+			}
+		}
+	}
+}
+
+func (a *App) StartWsServer() {
+	http.HandleFunc("/ws", a.HandleConnections)
+
+	fmt.Println("Started WebSocket Server on :8000")
+	if err := http.ListenAndServe(":8000", nil); err != nil {
+		log.Fatalf("failed to start web socket server: %v", err)
+	}
+}
+
+func (a *App) JoinWsServer() {
+	c, _, err := websocket.DefaultDialer.Dial("ws://localhost:8000/ws", nil)
+	if err != nil {
+		log.Panicf("failed to connect to web socket server: %v", err)
+	}
+
+	// store the connection as App field
+	a.mu.Lock()
+	a.ws = c
+	a.mu.Unlock()
+
+	fmt.Println("Connected to WebSocket Server")
+
+	// continuosly read messages received from the server
+	for {
+		_, msg, err := c.ReadMessage()
+		if err != nil {
+			fmt.Printf("failed to read messages from ws: %v\n", err)
+		}
+
+		elemSize := binary.Size(rl.Vector2{})
+		if elemSize <= 0 || len(msg)%elemSize != 0 {
+			fmt.Printf("invalid vector payload size: msg=%d elem=%d\n", len(msg), elemSize)
+			continue
+		}
+
+		count := len(msg) / elemSize
+		vectors := make([]rl.Vector2, count)
+
+		if err := binary.Read(bytes.NewReader(msg), binary.LittleEndian, vectors); err != nil {
+			fmt.Printf("failed to read vector data in ws message: %v\n", err)
+			continue
+		}
+
+		a.mu.Lock()
+		a.drawnPixels = vectors
+		a.mu.Unlock()
+
+	}
+}
+
+func (a *App) SendDrawingsToWs() {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	// make sure connection is valid
+	if a.ws == nil {
+		return
+	}
+
+	pixels := make([]rl.Vector2, len(a.drawnPixels))
+	copy(pixels, a.drawnPixels)
+
+	// convert the slice of vectors into bytes
+	buf := new(bytes.Buffer)
+	if err := binary.Write(buf, binary.LittleEndian, pixels); err != nil {
+		fmt.Printf("failed to write a.drawnPixels to bytes: %v\n", err)
+		return
+	}
+
+	// send the bytes to the server
+	if err := a.ws.WriteMessage(websocket.BinaryMessage, buf.Bytes()); err != nil {
+		fmt.Printf("failed to write bytes to ws: %v\n", err)
+	}
 }
 
 func main() {

@@ -2,7 +2,10 @@ module github.com/anthonybliss1/picto-chat
 
 go 1.25.3
 
-require github.com/gen2brain/raylib-go/raylib v0.55.1
+require (
+	github.com/gen2brain/raylib-go/raylib v0.55.1
+	github.com/gorilla/websocket v1.5.3
+)
 
 require (
 	github.com/ebitengine/purego v0.9.1 // indirect
