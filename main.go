@@ -12,9 +12,10 @@ const (
 	screenWidth  = 1500
 	screenHeight = 900
 
-	AppStateStart     AppState = iota
-	AppStateDrawStart          // showing 'Draw Here...' text before anything is drawn
-	AppStateDrawing            // when the user is actively drawing
+	AppStateStart      AppState = iota
+	AppStateRoomConfig          // config menu to either join or create a room
+	AppStateDrawStart           // showing 'Draw Here...' text before anything is drawn
+	AppStateDrawing             // when the user is actively drawing
 )
 
 type FontSet struct {
@@ -30,6 +31,12 @@ type App struct {
 
 	mouseX float32 // store x coordinates of mouse position
 	mouseY float32 // store y coordinates of mouse position
+
+	// store button data to use in the Update() function
+	makeRoomButton      rl.Rectangle
+	makeRoomButtonColor rl.Color
+	joinRoomButton      rl.Rectangle
+	joinRoomButtonColor rl.Color
 
 	drawnPixels []rl.Vector2 // store all drawn 'circles' on the screen (not necessarily pixels)
 	drawRadius  float32      // radius of the cirlces drawn
@@ -68,6 +75,35 @@ func (a *App) Draw() {
 
 		drawTextCentered(a.font.Regular, t1, (screenHeight/2)-40, 50, rl.White)
 		drawTextCentered(a.font.Italic, t2, (screenHeight/2)+5, 35, rl.White)
+
+	// draw config screen to enter or join room
+	case AppStateRoomConfig:
+		t1 := "Select your room option..."
+		drawTextCentered(a.font.Regular, t1, (screenHeight/2)-150, 50, rl.White)
+
+		// placing two buttons inside eachother to create a rounded outline for the button
+		insertRec1 := rl.NewRectangle((screenWidth/2)+10, (screenHeight / 2), float32(210), float32(100))
+		a.joinRoomButton = rl.NewRectangle((insertRec1.X + 5), (insertRec1.Y + 5), float32(200), float32(90))
+
+		// draw insertRec first (white background), then smaller join button (black)
+		rl.DrawRectangleRounded(insertRec1, float32(0.5), int32(0), a.joinRoomButtonColor)
+		rl.DrawRectangleRounded(a.joinRoomButton, float32(0.5), int32(0), rl.Black)
+
+		// draw the 'Join Room' button text
+		joinRoomText := "Join Room"
+		rl.DrawTextEx(a.font.BoldItalic, joinRoomText, rl.NewVector2(a.joinRoomButton.X+float32(11), a.joinRoomButton.Y+float32(25)), 40, 3, rl.White)
+
+		// draw the 'Make Room' button text
+		insertRec2 := rl.NewRectangle((screenWidth/2)-250, (screenHeight / 2), float32(210), float32(100))
+		a.makeRoomButton = rl.NewRectangle((insertRec2.X + 5), (insertRec2.Y + 5), float32(200), float32(90))
+
+		// draw insertRec first (white background), then smaller make room button (black)
+		rl.DrawRectangleRounded(insertRec2, float32(0.5), int32(0), a.makeRoomButtonColor)
+		rl.DrawRectangleRounded(a.makeRoomButton, float32(0.5), int32(0), rl.Black)
+
+		// draw the 'Make Room' button text
+		makeRoomText := "Make Room"
+		rl.DrawTextEx(a.font.BoldItalic, makeRoomText, rl.NewVector2(a.makeRoomButton.X+float32(12), a.makeRoomButton.Y+float32(25)), 40, 3, rl.White)
 
 	// essentially the same as drawing but shows 'Draw Here...' prompt
 	case AppStateDrawStart:
@@ -115,6 +151,29 @@ func (a *App) Update() {
 		a.OnSpacePressed()
 		a.drawnPixels = []rl.Vector2{}
 
+	case AppStateRoomConfig:
+		a.GetMousePos()
+
+		// change button color is mouse position is inside button and handle click events for both buttons using IsMouseButtonReleased
+		if rl.CheckCollisionPointRec(rl.NewVector2(a.mouseX, a.mouseY), a.joinRoomButton) {
+			a.joinRoomButtonColor = rl.Blue // change button color to blue on hover
+
+			// handle click events on 'Join Room' button
+			if rl.IsMouseButtonReleased(rl.MouseButtonLeft) {
+				a.currentAppState = AppStateDrawStart
+			}
+		} else {
+			a.joinRoomButtonColor = rl.White // change button color back to white when no collision
+		}
+
+		// check collisions for 'Make Room Button'
+		if rl.CheckCollisionPointRec(rl.NewVector2(a.mouseX, a.mouseY), a.makeRoomButton) {
+			a.makeRoomButtonColor = rl.Blue // change button color to blue on hover
+			fmt.Println("HOVERED MAKE ROOM!")
+		} else {
+			a.makeRoomButtonColor = rl.White // change button color back to white when no collision
+		}
+
 	// draw start just to show the draw prompt but there is no handler for clearing drawing
 	case AppStateDrawStart:
 		a.OnMPressed()
@@ -135,7 +194,7 @@ func (a *App) OnSpacePressed() {
 	switch a.currentAppState {
 	case AppStateStart:
 		if rl.IsKeyPressed(rl.KeySpace) {
-			a.currentAppState = AppStateDrawStart
+			a.currentAppState = AppStateRoomConfig
 		}
 
 	case AppStateDrawing:
