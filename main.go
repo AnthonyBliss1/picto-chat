@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"time"
 
 	rl "github.com/gen2brain/raylib-go/raylib"
 	"github.com/gorilla/websocket"
@@ -29,6 +30,7 @@ var upgrader = websocket.Upgrader{
 }
 
 var clients = make(map[*websocket.Conn]bool)
+var clientsMu sync.Mutex
 
 type FontSet struct {
 	Regular    rl.Font
@@ -50,7 +52,9 @@ type App struct {
 	joinRoomButton      rl.Rectangle
 	joinRoomButtonColor rl.Color
 
-	ws *websocket.Conn
+	ws         *websocket.Conn
+	isRoomHost bool
+	wsAddr     string
 
 	drawnPixels []rl.Vector2 // store all drawn 'circles' on the screen (not necessarily pixels)
 	drawRadius  float32      // radius of the cirlces drawn
@@ -126,6 +130,17 @@ func (a *App) Draw() {
 		t1 := "Draw Here..."
 		drawTextCentered(a.font.Italic, t1, (screenHeight/2)-40, 35, rl.White)
 
+		// check if the user is the host of the room
+		var hostLabel string
+		if a.isRoomHost {
+			hostLabel = "Host: You"
+		} else {
+			hostLabel = fmt.Sprintf("Host: %s", a.wsAddr)
+		}
+
+		// draw the host label to identify who is the host
+		rl.DrawTextEx(a.font.Italic, hostLabel, rl.NewVector2((screenWidth-700), 10), 35, 3, rl.Red)
+
 		// draw mouse pos and label
 		mousePos := fmt.Sprintf("(%.0f, %.0f)", a.mouseX, a.mouseY)
 		rl.DrawTextEx(a.font.Italic, "Mouse Pos.", rl.NewVector2(50, 10), 35, 3, rl.White)
@@ -146,6 +161,17 @@ func (a *App) Draw() {
 			rl.DrawCircle(int32(p.X), int32(p.Y), a.drawRadius, rl.White)
 		}
 		a.mu.RUnlock()
+
+		// check if the user is the host of the room
+		var hostLabel string
+		if a.isRoomHost {
+			hostLabel = "Host: You"
+		} else {
+			hostLabel = fmt.Sprintf("Host: %s", a.wsAddr)
+		}
+
+		// draw the host label to identify who is the host
+		rl.DrawTextEx(a.font.Italic, hostLabel, rl.NewVector2((screenWidth-500), 10), 35, 3, rl.Red)
 
 		// draw mouse pos and label
 		mousePos := fmt.Sprintf("(%.0f, %.0f)", a.mouseX, a.mouseY)
@@ -182,7 +208,7 @@ func (a *App) Update() {
 			// handle click events on 'Join Room' button
 			if rl.IsMouseButtonReleased(rl.MouseButtonLeft) {
 				a.currentAppState = AppStateDrawStart
-
+				a.isRoomHost = false
 				go func() {
 					a.JoinWsServer()
 				}()
@@ -198,7 +224,7 @@ func (a *App) Update() {
 			// handle click events on 'Make Room' button
 			if rl.IsMouseButtonReleased(rl.MouseButtonLeft) {
 				a.currentAppState = AppStateDrawStart
-
+				a.isRoomHost = true
 				go func() {
 					a.StartWsServer()
 				}()
@@ -252,7 +278,7 @@ func (a *App) OnMPressed() {
 		}
 
 	case AppStateDrawing:
-		if rl.IsKeyPressed(rl.KeyM) {
+		if rl.IsKeyReleased(rl.KeyM) {
 			a.currentAppState = AppStateStart
 		}
 	}
@@ -318,13 +344,17 @@ func (a *App) HandleConnections(w http.ResponseWriter, r *http.Request) {
 	}
 	defer ws.Close()
 
+	clientsMu.Lock()
 	clients[ws] = true
+	clientsMu.Unlock()
 
 	for {
 		_, msg, err := ws.ReadMessage()
 		if err != nil {
 			fmt.Printf("error reading message from ws: %v\n", err)
+			clientsMu.Lock()
 			delete(clients, ws)
+			clientsMu.Unlock()
 			break
 		}
 
@@ -346,6 +376,7 @@ func (a *App) HandleConnections(w http.ResponseWriter, r *http.Request) {
 		a.drawnPixels = vectors
 		a.mu.Unlock()
 
+		clientsMu.Lock()
 		for client := range clients {
 			if err := client.WriteMessage(websocket.BinaryMessage, msg); err != nil {
 				fmt.Printf("error writing message [%s]: %v\n", msg, err)
@@ -353,6 +384,7 @@ func (a *App) HandleConnections(w http.ResponseWriter, r *http.Request) {
 				delete(clients, client)
 			}
 		}
+		clientsMu.Unlock()
 	}
 }
 
@@ -360,16 +392,25 @@ func (a *App) StartWsServer() {
 	http.HandleFunc("/ws", a.HandleConnections)
 
 	fmt.Println("Started WebSocket Server on :8000")
-	if err := http.ListenAndServe(":8000", nil); err != nil {
+	if err := http.ListenAndServe("0.0.0.0:8000", nil); err != nil {
 		log.Fatalf("failed to start web socket server: %v", err)
 	}
 }
 
 func (a *App) JoinWsServer() {
-	c, _, err := websocket.DefaultDialer.Dial("ws://localhost:8000/ws", nil)
-	if err != nil {
-		log.Panicf("failed to connect to web socket server: %v", err)
+	var c *websocket.Conn
+	var err error
+
+	// retry connection 3 times with a 200 ms pause in between (helps with host connection)
+	for i := 0; i < 3; i++ {
+		c, _, err = websocket.DefaultDialer.Dial("ws://192.168.1.113:8000/ws", nil)
+		if err != nil {
+			log.Printf("failed to connect to web socket server: %v", err)
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
+	a.wsAddr = c.UnderlyingConn().RemoteAddr().String()
 
 	// store the connection as App field
 	a.mu.Lock()
@@ -408,7 +449,6 @@ func (a *App) JoinWsServer() {
 
 func (a *App) SendDrawingsToWs() {
 	a.mu.RLock()
-	defer a.mu.RUnlock()
 
 	// make sure connection is valid
 	if a.ws == nil {
@@ -417,6 +457,7 @@ func (a *App) SendDrawingsToWs() {
 
 	pixels := make([]rl.Vector2, len(a.drawnPixels))
 	copy(pixels, a.drawnPixels)
+	a.mu.RUnlock()
 
 	// convert the slice of vectors into bytes
 	buf := new(bytes.Buffer)
