@@ -247,9 +247,7 @@ func (a *App) Update() {
 			if rl.IsMouseButtonReleased(rl.MouseButtonLeft) {
 				a.isRoomHost = true
 				go func() {
-					a.isServerActive = true
 					a.StartWsServer()
-					a.isServerActive = false
 				}()
 				go func() {
 					a.JoinWsServer()
@@ -299,18 +297,24 @@ func (a *App) OnMPressed() {
 		if rl.IsKeyPressed(rl.KeyM) {
 			if a.isServerActive && a.isRoomHost {
 				ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-				defer cancel()
-
-				a.currentAppState = AppStateStart
+				cancel()
 
 				a.server.Shutdown(ctx)
 				fmt.Println("Server Shutdown...")
+				a.currentAppState = AppStateStart
 			}
 		}
 
 	case AppStateDrawing:
 		if rl.IsKeyReleased(rl.KeyM) {
-			a.currentAppState = AppStateStart
+			if a.isServerActive && a.isRoomHost {
+				ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+				cancel()
+
+				a.server.Shutdown(ctx)
+				fmt.Println("Server Shutdown...")
+				a.currentAppState = AppStateStart
+			}
 		}
 	}
 }
@@ -429,8 +433,10 @@ func (a *App) StartWsServer() {
 	}
 
 	fmt.Println("Started WebSocket Server on :8000")
+	a.isServerActive = true
 	if err := a.server.ListenAndServe(); err != nil {
 		log.Printf("server shutdown error: %v\n", err)
+		a.isServerActive = false
 	}
 }
 
