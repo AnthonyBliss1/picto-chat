@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"log"
@@ -52,9 +53,11 @@ type App struct {
 	joinRoomButton      rl.Rectangle
 	joinRoomButtonColor rl.Color
 
-	ws         *websocket.Conn
-	isRoomHost bool
-	wsAddr     string
+	server         *http.Server
+	isServerActive bool
+	ws             *websocket.Conn
+	isRoomHost     bool
+	wsAddr         string
 
 	drawnPixels []rl.Vector2 // store all drawn 'circles' on the screen (not necessarily pixels)
 	drawRadius  float32      // radius of the cirlces drawn
@@ -139,7 +142,7 @@ func (a *App) Draw() {
 		}
 
 		// draw the host label to identify who is the host
-		rl.DrawTextEx(a.font.Italic, hostLabel, rl.NewVector2((screenWidth-700), 10), 35, 3, rl.Red)
+		rl.DrawTextEx(a.font.Italic, hostLabel, rl.NewVector2((screenWidth-500), 10), 35, 3, rl.Red)
 
 		// draw mouse pos and label
 		mousePos := fmt.Sprintf("(%.0f, %.0f)", a.mouseX, a.mouseY)
@@ -153,6 +156,14 @@ func (a *App) Draw() {
 		// draw space shortcut
 		rl.DrawTextEx(a.font.Italic, "Clear", rl.NewVector2(460, 10), 35, 2, rl.White)
 		rl.DrawTextEx(a.font.Italic, "[Space]", rl.NewVector2(440, 50), 35, 2, rl.White)
+
+		// draw 'Drawing Tools' section
+		insertRec := rl.NewRectangle(float32(40), float32(screenHeight)-150, float32(350), float32(100))
+		radiusContainer := rl.NewRectangle(insertRec.X+5, insertRec.Y+5, insertRec.Width-10, insertRec.Height-10)
+
+		rl.DrawTextEx(a.font.Italic, "Drawing Tools", rl.NewVector2(insertRec.X+70, insertRec.Y-40), 35, 2, rl.White)
+		rl.DrawRectangleRounded(insertRec, float32(0.5), int32(0), rl.White)
+		rl.DrawRectangleRounded(radiusContainer, float32(0.5), int32(0), rl.Black)
 
 	// actively drawing state, drop prompt and and draw the circles
 	case AppStateDrawing:
@@ -185,6 +196,14 @@ func (a *App) Draw() {
 		// draw space shortcut
 		rl.DrawTextEx(a.font.Italic, "Clear", rl.NewVector2(460, 10), 35, 2, rl.White)
 		rl.DrawTextEx(a.font.Italic, "[Space]", rl.NewVector2(440, 50), 35, 2, rl.White)
+
+		// draw 'Drawing Tools' section
+		insertRec := rl.NewRectangle(float32(40), float32(screenHeight)-150, float32(350), float32(100))
+		radiusContainer := rl.NewRectangle(insertRec.X+5, insertRec.Y+5, insertRec.Width-10, insertRec.Height-10)
+
+		rl.DrawTextEx(a.font.Italic, "Drawing Tools", rl.NewVector2(insertRec.X+70, insertRec.Y-40), 35, 2, rl.White)
+		rl.DrawRectangleRounded(insertRec, float32(0.5), int32(0), rl.White)
+		rl.DrawRectangleRounded(radiusContainer, float32(0.5), int32(0), rl.Black)
 	}
 }
 
@@ -201,13 +220,16 @@ func (a *App) Update() {
 	case AppStateRoomConfig:
 		a.GetMousePos()
 
+		if a.wsAddr != "" && a.isServerActive {
+			a.currentAppState = AppStateDrawStart
+		}
+
 		// change button color is mouse position is inside button and handle click events for both buttons using IsMouseButtonReleased
 		if rl.CheckCollisionPointRec(rl.NewVector2(a.mouseX, a.mouseY), a.joinRoomButton) {
 			a.joinRoomButtonColor = rl.Blue // change button color to blue on hover
 
 			// handle click events on 'Join Room' button
 			if rl.IsMouseButtonReleased(rl.MouseButtonLeft) {
-				a.currentAppState = AppStateDrawStart
 				a.isRoomHost = false
 				go func() {
 					a.JoinWsServer()
@@ -223,10 +245,11 @@ func (a *App) Update() {
 
 			// handle click events on 'Make Room' button
 			if rl.IsMouseButtonReleased(rl.MouseButtonLeft) {
-				a.currentAppState = AppStateDrawStart
 				a.isRoomHost = true
 				go func() {
+					a.isServerActive = true
 					a.StartWsServer()
+					a.isServerActive = false
 				}()
 				go func() {
 					a.JoinWsServer()
@@ -274,7 +297,15 @@ func (a *App) OnMPressed() {
 	switch a.currentAppState {
 	case AppStateDrawStart:
 		if rl.IsKeyPressed(rl.KeyM) {
-			a.currentAppState = AppStateStart
+			if a.isServerActive && a.isRoomHost {
+				ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+				defer cancel()
+
+				a.currentAppState = AppStateStart
+
+				a.server.Shutdown(ctx)
+				fmt.Println("Server Shutdown...")
+			}
 		}
 
 	case AppStateDrawing:
@@ -389,11 +420,17 @@ func (a *App) HandleConnections(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) StartWsServer() {
-	http.HandleFunc("/ws", a.HandleConnections)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", a.HandleConnections)
+
+	a.server = &http.Server{
+		Addr:    "0.0.0.0:8000",
+		Handler: mux,
+	}
 
 	fmt.Println("Started WebSocket Server on :8000")
-	if err := http.ListenAndServe("0.0.0.0:8000", nil); err != nil {
-		log.Fatalf("failed to start web socket server: %v", err)
+	if err := a.server.ListenAndServe(); err != nil {
+		log.Printf("server shutdown error: %v\n", err)
 	}
 }
 
@@ -406,15 +443,19 @@ func (a *App) JoinWsServer() {
 		c, _, err = websocket.DefaultDialer.Dial("ws://192.168.1.113:8000/ws", nil)
 		if err != nil {
 			log.Printf("failed to connect to web socket server: %v", err)
-			break
+			//break
 		}
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(300 * time.Millisecond)
 	}
-	a.wsAddr = c.UnderlyingConn().RemoteAddr().String()
 
 	// store the connection as App field
 	a.mu.Lock()
-	a.ws = c
+	if c != nil {
+		a.ws = c
+		a.wsAddr = c.UnderlyingConn().RemoteAddr().String()
+	} else {
+		return
+	}
 	a.mu.Unlock()
 
 	fmt.Println("Connected to WebSocket Server")
