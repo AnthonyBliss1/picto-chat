@@ -166,6 +166,13 @@ func (a *App) Draw() {
 		// draw the host label to identify who is the host
 		rl.DrawTextEx(a.font.Italic, hostLabel, rl.NewVector2((screenWidth-500), 10), 35, 3, rl.Red)
 
+		// draw the number of connected clients
+		clientsMu.Lock()
+		clientsLabel := fmt.Sprintf("Clients: %d", len(clients))
+		clientsMu.Unlock()
+
+		rl.DrawTextEx(a.font.Italic, clientsLabel, rl.NewVector2((screenWidth-500), 50), 35, 2, rl.Red)
+
 		// draw mouse pos and label
 		mousePos := fmt.Sprintf("(%.0f, %.0f)", a.mouseX, a.mouseY)
 		rl.DrawTextEx(a.font.Italic, "Mouse Pos.", rl.NewVector2(50, 10), 35, 3, rl.White)
@@ -231,6 +238,13 @@ func (a *App) Draw() {
 
 		// draw the host label to identify who is the host
 		rl.DrawTextEx(a.font.Italic, hostLabel, rl.NewVector2((screenWidth-500), 10), 35, 3, rl.Red)
+
+		// draw the number of connected clients
+		clientsMu.Lock()
+		clientsLabel := fmt.Sprintf("Clients: %d", len(clients))
+		clientsMu.Unlock()
+
+		rl.DrawTextEx(a.font.Italic, clientsLabel, rl.NewVector2((screenWidth-500), 50), 35, 2, rl.Red)
 
 		// draw mouse pos and label
 		mousePos := fmt.Sprintf("(%.0f, %.0f)", a.mouseX, a.mouseY)
@@ -381,10 +395,15 @@ func (a *App) OnMPressed() {
 		if rl.IsKeyPressed(rl.KeyM) {
 			if a.isServerActive && a.isRoomHost {
 				ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-				cancel()
+				defer cancel()
 
 				a.server.Shutdown(ctx)
 				fmt.Println("Server Shutdown...")
+
+				clientsMu.Lock()
+				clients = make(map[*websocket.Conn]bool)
+				clientsMu.Unlock()
+
 				a.currentAppState = AppStateStart
 			}
 		}
@@ -533,9 +552,10 @@ func (a *App) JoinWsServer() {
 		c, _, err = websocket.DefaultDialer.Dial("ws://192.168.1.113:8000/ws", nil)
 		if err != nil {
 			log.Printf("failed to connect to web socket server: %v", err)
-			//break
+			time.Sleep(300 * time.Millisecond)
+			continue
 		}
-		time.Sleep(300 * time.Millisecond)
+		break
 	}
 
 	// store the connection as App field
