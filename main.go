@@ -40,6 +40,24 @@ type FontSet struct {
 	BoldItalic rl.Font
 }
 
+type FiveRadiusCircle struct {
+	X, Y   int32
+	Radius float32
+	Color  rl.Color
+}
+
+type TenRadiusCircle struct {
+	X, Y   int32
+	Radius float32
+	Color  rl.Color
+}
+
+type TwentyRadiusCircle struct {
+	X, Y   int32
+	Radius float32
+	Color  rl.Color
+}
+
 type App struct {
 	currentAppState AppState // app state to handle events
 	font            FontSet  // store fonts
@@ -59,8 +77,12 @@ type App struct {
 	isRoomHost     bool
 	wsAddr         string
 
-	drawnPixels []rl.Vector2 // store all drawn 'circles' on the screen (not necessarily pixels)
-	drawRadius  float32      // radius of the cirlces drawn
+	drawnPixels       []rl.Vector2 // store all drawn 'circles' on the screen (not necessarily pixels)
+	currentDrawRadius float32      // radius of the cirlces drawn
+
+	fiveC   FiveRadiusCircle
+	tenC    TenRadiusCircle
+	twentyC TwentyRadiusCircle
 
 	mu sync.RWMutex
 
@@ -71,7 +93,7 @@ func (a *App) Init() {
 	a.currentAppState = AppStateStart
 
 	// set default circle radius to 10
-	a.drawRadius = 10
+	a.currentDrawRadius = 10
 
 	cps := codePoints()
 
@@ -165,11 +187,37 @@ func (a *App) Draw() {
 		rl.DrawRectangleRounded(insertRec, float32(0.5), int32(0), rl.White)
 		rl.DrawRectangleRounded(radiusContainer, float32(0.5), int32(0), rl.Black)
 
+		// add radii selection tools
+		conX := radiusContainer.ToInt32().X
+		conY := radiusContainer.ToInt32().Y
+		conH := radiusContainer.ToInt32().Height
+
+		switch a.currentDrawRadius {
+		case 5:
+			a.fiveC = FiveRadiusCircle{X: conX + 50 + 5, Y: conY + (conH / 2), Radius: float32(5), Color: rl.Blue}
+			a.tenC = TenRadiusCircle{X: conX + 150 + 8, Y: conY + (conH / 2), Radius: float32(10), Color: rl.White}
+			a.twentyC = TwentyRadiusCircle{X: conX + 250 + 23, Y: conY + (conH / 2), Radius: float32(20), Color: rl.White}
+
+		case 10:
+			a.fiveC = FiveRadiusCircle{X: conX + 50 + 5, Y: conY + (conH / 2), Radius: float32(5), Color: rl.White}
+			a.tenC = TenRadiusCircle{X: conX + 150 + 8, Y: conY + (conH / 2), Radius: float32(10), Color: rl.Blue}
+			a.twentyC = TwentyRadiusCircle{X: conX + 250 + 23, Y: conY + (conH / 2), Radius: float32(20), Color: rl.White}
+
+		case 20:
+			a.fiveC = FiveRadiusCircle{X: conX + 50 + 5, Y: conY + (conH / 2), Radius: float32(5), Color: rl.White}
+			a.tenC = TenRadiusCircle{X: conX + 150 + 8, Y: conY + (conH / 2), Radius: float32(10), Color: rl.White}
+			a.twentyC = TwentyRadiusCircle{X: conX + 250 + 23, Y: conY + (conH / 2), Radius: float32(20), Color: rl.Blue}
+		}
+
+		rl.DrawCircle(a.fiveC.X, a.fiveC.Y, a.fiveC.Radius, a.fiveC.Color)
+		rl.DrawCircle(a.tenC.X, a.tenC.Y, a.tenC.Radius, a.tenC.Color)
+		rl.DrawCircle(a.twentyC.X, a.twentyC.Y, a.twentyC.Radius, a.twentyC.Color)
+
 	// actively drawing state, drop prompt and and draw the circles
 	case AppStateDrawing:
 		a.mu.RLock()
 		for _, p := range a.drawnPixels {
-			rl.DrawCircle(int32(p.X), int32(p.Y), a.drawRadius, rl.White)
+			rl.DrawCircle(int32(p.X), int32(p.Y), a.currentDrawRadius, rl.White)
 		}
 		a.mu.RUnlock()
 
@@ -204,6 +252,11 @@ func (a *App) Draw() {
 		rl.DrawTextEx(a.font.Italic, "Drawing Tools", rl.NewVector2(insertRec.X+70, insertRec.Y-40), 35, 2, rl.White)
 		rl.DrawRectangleRounded(insertRec, float32(0.5), int32(0), rl.White)
 		rl.DrawRectangleRounded(radiusContainer, float32(0.5), int32(0), rl.Black)
+
+		// add radii selection tools
+		rl.DrawCircle(a.fiveC.X, a.fiveC.Y, a.fiveC.Radius, a.fiveC.Color)
+		rl.DrawCircle(a.tenC.X, a.tenC.Y, a.tenC.Radius, a.tenC.Color)
+		rl.DrawCircle(a.twentyC.X, a.twentyC.Y, a.twentyC.Radius, a.twentyC.Color)
 	}
 }
 
@@ -270,6 +323,37 @@ func (a *App) Update() {
 		a.GetMousePos()
 		a.OnMousePress()
 		a.SendDrawingsToWs()
+
+		// handle drawing tool hover and click. on click, change the currentDrawRadius
+		// handle conditions for 5 radius cirlce
+		if rl.CheckCollisionPointCircle(rl.NewVector2(a.mouseX, a.mouseY), rl.NewVector2(float32(a.fiveC.X), float32(a.fiveC.Y)), a.fiveC.Radius) {
+			a.fiveC.Color = rl.Blue
+			if rl.IsMouseButtonPressed(rl.MouseButtonLeft) {
+				a.currentDrawRadius = 5
+			}
+		} else if a.currentDrawRadius != 5 {
+			a.fiveC.Color = rl.White
+		}
+
+		// handle conditions for 10 radius circle
+		if rl.CheckCollisionPointCircle(rl.NewVector2(a.mouseX, a.mouseY), rl.NewVector2(float32(a.tenC.X), float32(a.tenC.Y)), a.tenC.Radius) {
+			a.tenC.Color = rl.Blue
+			if rl.IsMouseButtonPressed(rl.MouseButtonLeft) {
+				a.currentDrawRadius = 10
+			}
+		} else if a.currentDrawRadius != 10 {
+			a.tenC.Color = rl.White
+		}
+
+		// handle conditions for 20 radius circle
+		if rl.CheckCollisionPointCircle(rl.NewVector2(a.mouseX, a.mouseY), rl.NewVector2(float32(a.twentyC.X), float32(a.twentyC.Y)), a.twentyC.Radius) {
+			a.twentyC.Color = rl.Blue
+			if rl.IsMouseButtonPressed(rl.MouseButtonLeft) {
+				a.currentDrawRadius = 20
+			}
+		} else if a.currentDrawRadius != 20 {
+			a.twentyC.Color = rl.White
+		}
 	}
 }
 
@@ -337,7 +421,7 @@ func (a *App) OnMousePress() {
 			dy := cur.Y - a.lastDrawnPixel.Y
 			dist := rl.Vector2Length(rl.NewVector2(dx, dy))
 
-			step := a.drawRadius * 0.5
+			step := a.currentDrawRadius * 0.5
 			if step < 1 {
 				step = 1
 			}
