@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
 	rl "github.com/gen2brain/raylib-go/raylib"
 	"github.com/gorilla/websocket"
+	"github.com/hashicorp/mdns"
 )
 
 type AppState int
@@ -22,6 +24,7 @@ const (
 
 	AppStateStart      AppState = iota
 	AppStateRoomConfig          // config menu to either join or create a room
+	AppStateRoomSelect          // after selecting to join room, select from list of available rooms
 	AppStateDrawStart           // showing 'Draw Here...' text before anything is drawn
 	AppStateDrawing             // when the user is actively drawing
 )
@@ -58,6 +61,13 @@ type TwentyRadiusCircle struct {
 	Color  rl.Color
 }
 
+type Room struct {
+	hostName string
+	Addr     string
+	Port     int
+	URL      string
+}
+
 type App struct {
 	currentAppState AppState // app state to handle events
 	font            FontSet  // store fonts
@@ -72,10 +82,15 @@ type App struct {
 	joinRoomButtonColor rl.Color
 
 	server         *http.Server
-	isServerActive bool
-	ws             *websocket.Conn
-	isRoomHost     bool
-	wsAddr         string
+	MDNSServer     *mdns.Server
+	isServerBooted bool
+
+	availRooms    map[Room]struct{} // no duplicates
+	currentRoom   Room
+	lastMDNSQuery time.Time
+
+	ws         *websocket.Conn
+	isRoomHost bool
 
 	drawnPixels       []rl.Vector2 // store all drawn 'circles' on the screen (not necessarily pixels)
 	currentDrawRadius float32      // radius of the cirlces drawn
@@ -150,6 +165,50 @@ func (a *App) Draw() {
 		makeRoomText := "Make Room"
 		rl.DrawTextEx(a.font.BoldItalic, makeRoomText, rl.NewVector2(a.makeRoomButton.X+float32(12), a.makeRoomButton.Y+float32(25)), 40, 3, rl.White)
 
+	case AppStateRoomSelect:
+		t1 := "Select a room..."
+		drawTextCentered(a.font.Regular, t1, (screenHeight/2)-250, 50, rl.White)
+
+		if len(a.availRooms) != 0 {
+			var step = 0
+			var gap int
+			for room := range a.availRooms {
+				if step == 0 {
+					gap = 0
+				} else {
+					gap = 50
+				}
+
+				insertRec := rl.NewRectangle(((screenWidth / 2) - (350 / 2)), float32((screenHeight/2)+((step*100)+gap)-150), float32(350), float32(70))
+				roomContainer := rl.NewRectangle(insertRec.X+5, insertRec.Y+5, insertRec.Width-10, insertRec.Height-10)
+
+				var hostName string
+				hostRunes := []rune(room.hostName)
+				if len(hostRunes) > 15 {
+					hostName = fmt.Sprintf("%s...", string(hostRunes[:16]))
+				} else {
+					hostName = string(hostRunes)
+				}
+
+				hostNameMes := rl.MeasureTextEx(a.font.Italic, hostName, 35, 2)
+
+				if rl.CheckCollisionPointRec(rl.NewVector2(a.mouseX, a.mouseY), insertRec) {
+					rl.DrawRectangleRounded(insertRec, float32(0.5), int32(0), rl.Blue)
+					if rl.IsMouseButtonReleased(rl.MouseButtonLeft) {
+						go a.JoinWsServer(room.URL)
+						a.currentRoom = room
+					}
+				} else {
+					rl.DrawRectangleRounded(insertRec, float32(0.5), int32(0), rl.White)
+				}
+				rl.DrawRectangleRounded(roomContainer, float32(0.5), int32(0), rl.Black)
+				rl.DrawTextEx(a.font.Italic, hostName, rl.NewVector2((insertRec.X+(insertRec.Width/2))-(hostNameMes.X/2), insertRec.Y+(insertRec.Height/2)-(35/2)), 35, 2, rl.White)
+				step++
+			}
+		} else {
+			drawTextCentered(a.font.Italic, "No Rooms Found 😕", screenHeight/2, 35, rl.White)
+		}
+
 	// essentially the same as drawing but shows 'Draw Here...' prompt
 	case AppStateDrawStart:
 		t1 := "Draw Here..."
@@ -160,7 +219,7 @@ func (a *App) Draw() {
 		if a.isRoomHost {
 			hostLabel = "Host: You"
 		} else {
-			hostLabel = fmt.Sprintf("Host: %s", a.wsAddr)
+			hostLabel = fmt.Sprintf("Host: %s", a.currentRoom.hostName)
 		}
 
 		// draw the host label to identify who is the host
@@ -235,7 +294,7 @@ func (a *App) Draw() {
 		if a.isRoomHost {
 			hostLabel = "Host: You"
 		} else {
-			hostLabel = fmt.Sprintf("Host: %s", a.wsAddr)
+			hostLabel = fmt.Sprintf("Host: %s", a.currentRoom.hostName)
 		}
 
 		// draw the host label to identify who is the host
@@ -291,7 +350,7 @@ func (a *App) Update() {
 	case AppStateRoomConfig:
 		a.GetMousePos()
 
-		if a.wsAddr != "" && a.isServerActive {
+		if a.isRoomHost && a.isServerBooted {
 			a.currentAppState = AppStateDrawStart
 		}
 
@@ -299,12 +358,12 @@ func (a *App) Update() {
 		if rl.CheckCollisionPointRec(rl.NewVector2(a.mouseX, a.mouseY), a.joinRoomButton) {
 			a.joinRoomButtonColor = rl.Blue // change button color to blue on hover
 
-			// handle click events on 'Join Room' button
+			// handle click events on 'Join Room' button -> room selection screen after mDNS query
 			if rl.IsMouseButtonReleased(rl.MouseButtonLeft) {
 				a.isRoomHost = false
-				go func() {
-					a.JoinWsServer()
-				}()
+				a.MDNSLookup()
+				a.lastMDNSQuery = time.Now()
+				a.currentAppState = AppStateRoomSelect
 			}
 		} else {
 			a.joinRoomButtonColor = rl.White // change button color back to white when no collision
@@ -318,14 +377,26 @@ func (a *App) Update() {
 			if rl.IsMouseButtonReleased(rl.MouseButtonLeft) {
 				a.isRoomHost = true
 				go func() {
-					a.StartWsServer()
+					a.StartMDNS()
 				}()
 				go func() {
-					a.JoinWsServer()
+					a.JoinWsServer("ws://0.0.0.0:8000/ws")
 				}()
 			}
 		} else {
 			a.makeRoomButtonColor = rl.White // change button color back to white when no collision
+		}
+
+	case AppStateRoomSelect:
+		a.GetMousePos()
+
+		if a.currentRoom.URL != "" {
+			a.currentAppState = AppStateDrawStart
+		}
+
+		if time.Since(a.lastMDNSQuery) > 2*time.Second {
+			go a.MDNSLookup()
+			a.lastMDNSQuery = time.Now()
 		}
 
 	// draw start just to show the draw prompt but there is no handler for clearing drawing
@@ -395,14 +466,21 @@ func (a *App) OnSpacePressed() {
 // shortcut to navigate back to menu on 'M' press
 func (a *App) OnMPressed() {
 	switch a.currentAppState {
+	case AppStateRoomSelect:
+		a.currentAppState = AppStateStart
+		a.availRooms = make(map[Room]struct{})
+
 	case AppStateDrawStart:
 		if rl.IsKeyPressed(rl.KeyM) {
-			if a.isServerActive && a.isRoomHost {
+			if a.isServerBooted && a.isRoomHost {
 				ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 				defer cancel()
 
 				a.server.Shutdown(ctx)
 				fmt.Println("Server Shutdown...")
+
+				a.MDNSServer.Shutdown()
+				fmt.Println("MDNS Server Shutdown...")
 
 				clientsMu.Lock()
 				clients = make(map[*websocket.Conn]bool)
@@ -414,16 +492,24 @@ func (a *App) OnMPressed() {
 
 	case AppStateDrawing:
 		if rl.IsKeyReleased(rl.KeyM) {
-			if a.isServerActive && a.isRoomHost {
+			if a.isServerBooted && a.isRoomHost {
 				ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 				defer cancel()
 
 				a.server.Shutdown(ctx)
 				fmt.Println("Server Shutdown...")
 
+				a.MDNSServer.Shutdown()
+				fmt.Println("MDNS Server Shutdown...")
+
 				clientsMu.Lock()
 				clients = make(map[*websocket.Conn]bool)
 				clientsMu.Unlock()
+
+				a.mu.Lock()
+				a.currentRoom = Room{}
+				a.mu.Unlock()
+
 				a.currentAppState = AppStateStart
 			}
 		}
@@ -544,20 +630,53 @@ func (a *App) StartWsServer() {
 	}
 
 	fmt.Println("Started WebSocket Server on :8000")
-	a.isServerActive = true
+	a.isServerBooted = true
 	if err := a.server.ListenAndServe(); err != nil {
 		log.Printf("server shutdown error: %v\n", err)
-		a.isServerActive = false
+		a.isServerBooted = false
 	}
 }
 
-func (a *App) JoinWsServer() {
+func (a *App) StartMDNS() {
+	hostName, _ := os.Hostname()
+
+	info := []string{"Picto-Chat Server"}
+	service, _ := mdns.NewMDNSService(hostName, "_picto._tcp", "", "", 8000, nil, info)
+
+	fmt.Println("Starting MDNS Server...")
+	a.MDNSServer, _ = mdns.NewServer(&mdns.Config{Zone: service})
+
+	go func() {
+		a.StartWsServer()
+	}()
+}
+
+func (a *App) MDNSLookup() {
+	entriesCH := make(chan *mdns.ServiceEntry, 4)
+	newRooms := make(map[Room]struct{})
+	go func() {
+		for entry := range entriesCH {
+			fmt.Printf("Found new entry: %v\n", entry)
+			room := Room{hostName: entry.Host, Addr: entry.AddrV4.String(), Port: entry.Port}
+			room.URL = fmt.Sprintf("ws://%s:%d/ws", room.Addr, room.Port)
+			newRooms[room] = struct{}{}
+		}
+		a.mu.Lock()
+		a.availRooms = newRooms
+		a.mu.Unlock()
+	}()
+
+	mdns.Lookup("_picto._tcp", entriesCH)
+	close(entriesCH)
+}
+
+func (a *App) JoinWsServer(roomAddr string) {
 	var c *websocket.Conn
 	var err error
 
 	// retry connection 3 times with a 200 ms pause in between (helps with host connection)
 	for i := 0; i < 3; i++ {
-		c, _, err = websocket.DefaultDialer.Dial("ws://192.168.1.113:8000/ws", nil)
+		c, _, err = websocket.DefaultDialer.Dial(roomAddr, nil)
 		if err != nil {
 			log.Printf("failed to connect to web socket server: %v", err)
 			time.Sleep(300 * time.Millisecond)
@@ -570,7 +689,7 @@ func (a *App) JoinWsServer() {
 	a.mu.Lock()
 	if c != nil {
 		a.ws = c
-		a.wsAddr = c.UnderlyingConn().RemoteAddr().String()
+		a.isServerBooted = true
 	} else {
 		return
 	}
