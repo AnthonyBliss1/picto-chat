@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -85,7 +86,7 @@ type App struct {
 	MDNSServer     *mdns.Server
 	isServerBooted bool
 
-	availRooms    map[Room]struct{} // no duplicates
+	availRooms    []Room // slice for deterministic order
 	currentRoom   Room
 	lastMDNSQuery time.Time
 
@@ -170,16 +171,14 @@ func (a *App) Draw() {
 		drawTextCentered(a.font.Regular, t1, (screenHeight/2)-250, 50, rl.White)
 
 		if len(a.availRooms) != 0 {
-			var step = 0
-			var gap int
-			for room := range a.availRooms {
-				if step == 0 {
-					gap = 0
-				} else {
-					gap = 50
+			var gap = 50
+			for i, room := range a.availRooms {
+				// dont think there would be a situation where more than 5 rooms would be made. For now, will skip over them in the UI but in the future can add a scrolling section
+				if i > 5 {
+					continue
 				}
 
-				insertRec := rl.NewRectangle(((screenWidth / 2) - (350 / 2)), float32((screenHeight/2)+((step*100)+gap)-150), float32(350), float32(70))
+				insertRec := rl.NewRectangle(((screenWidth / 2) - (350 / 2)), float32((screenHeight/2)+((i*100)+gap)-200), float32(350), float32(70))
 				roomContainer := rl.NewRectangle(insertRec.X+5, insertRec.Y+5, insertRec.Width-10, insertRec.Height-10)
 
 				var hostName string
@@ -203,10 +202,9 @@ func (a *App) Draw() {
 				}
 				rl.DrawRectangleRounded(roomContainer, float32(0.5), int32(0), rl.Black)
 				rl.DrawTextEx(a.font.Italic, hostName, rl.NewVector2((insertRec.X+(insertRec.Width/2))-(hostNameMes.X/2), insertRec.Y+(insertRec.Height/2)-(35/2)), 35, 2, rl.White)
-				step++
 			}
 		} else {
-			drawTextCentered(a.font.Italic, "No Rooms Found 😕", screenHeight/2, 35, rl.White)
+			drawTextCentered(a.font.Italic, "No Rooms Found :(", screenHeight/2, 35, rl.White)
 		}
 
 	// essentially the same as drawing but shows 'Draw Here...' prompt
@@ -361,8 +359,10 @@ func (a *App) Update() {
 			// handle click events on 'Join Room' button -> room selection screen after mDNS query
 			if rl.IsMouseButtonReleased(rl.MouseButtonLeft) {
 				a.isRoomHost = false
-				a.MDNSLookup()
-				a.lastMDNSQuery = time.Now()
+				go func() {
+					a.MDNSLookup()
+					a.lastMDNSQuery = time.Now()
+				}()
 				a.currentAppState = AppStateRoomSelect
 			}
 		} else {
@@ -468,7 +468,7 @@ func (a *App) OnMPressed() {
 	switch a.currentAppState {
 	case AppStateRoomSelect:
 		a.currentAppState = AppStateStart
-		a.availRooms = make(map[Room]struct{})
+		a.availRooms = []Room{}
 
 	case AppStateDrawStart:
 		if rl.IsKeyPressed(rl.KeyM) {
@@ -641,7 +641,7 @@ func (a *App) StartMDNS() {
 	hostName, _ := os.Hostname()
 
 	info := []string{"Picto-Chat Server"}
-	service, _ := mdns.NewMDNSService(hostName, "_picto._tcp", "", "", 8000, nil, info)
+	service, _ := mdns.NewMDNSService(hostName, "_pictochat._tcp", "", "", 8000, nil, info)
 
 	fmt.Println("Starting MDNS Server...")
 	a.MDNSServer, _ = mdns.NewServer(&mdns.Config{Zone: service})
@@ -653,20 +653,28 @@ func (a *App) StartMDNS() {
 
 func (a *App) MDNSLookup() {
 	entriesCH := make(chan *mdns.ServiceEntry, 4)
-	newRooms := make(map[Room]struct{})
+	newRooms := []Room{}
 	go func() {
 		for entry := range entriesCH {
+			if !strings.Contains(entry.Name, "_pictochat._tcp") {
+				continue
+			}
+
+			if entry.Port != 8000 {
+				continue
+			}
+
 			fmt.Printf("Found new entry: %v\n", entry)
 			room := Room{hostName: entry.Host, Addr: entry.AddrV4.String(), Port: entry.Port}
 			room.URL = fmt.Sprintf("ws://%s:%d/ws", room.Addr, room.Port)
-			newRooms[room] = struct{}{}
+			newRooms = append(newRooms, room)
 		}
 		a.mu.Lock()
 		a.availRooms = newRooms
 		a.mu.Unlock()
 	}()
 
-	mdns.Lookup("_picto._tcp", entriesCH)
+	mdns.Lookup("_pictochat._tcp", entriesCH)
 	close(entriesCH)
 }
 
