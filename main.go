@@ -204,7 +204,7 @@ func (a *App) Draw() {
 				rl.DrawTextEx(a.font.Italic, hostName, rl.NewVector2((insertRec.X+(insertRec.Width/2))-(hostNameMes.X/2), insertRec.Y+(insertRec.Height/2)-(35/2)), 35, 2, rl.White)
 			}
 		} else {
-			drawTextCentered(a.font.Italic, "No Rooms Found :(", screenHeight/2, 35, rl.White)
+			drawTextCentered(a.font.Italic, "No rooms found :(", screenHeight/2, 35, rl.White)
 		}
 
 	// essentially the same as drawing but shows 'Draw Here...' prompt
@@ -347,6 +347,7 @@ func (a *App) Update() {
 
 	case AppStateRoomConfig:
 		a.GetMousePos()
+		a.OnMPressed()
 
 		if a.isRoomHost && a.isServerBooted {
 			a.currentAppState = AppStateDrawStart
@@ -389,6 +390,7 @@ func (a *App) Update() {
 
 	case AppStateRoomSelect:
 		a.GetMousePos()
+		a.OnMPressed()
 
 		if a.currentRoom.URL != "" {
 			a.currentAppState = AppStateDrawStart
@@ -466,9 +468,16 @@ func (a *App) OnSpacePressed() {
 // shortcut to navigate back to menu on 'M' press
 func (a *App) OnMPressed() {
 	switch a.currentAppState {
+	case AppStateRoomConfig:
+		if rl.IsKeyPressed(rl.KeyM) {
+			a.currentAppState = AppStateStart
+		}
+
 	case AppStateRoomSelect:
-		a.currentAppState = AppStateStart
-		a.availRooms = []Room{}
+		if rl.IsKeyPressed(rl.KeyM) {
+			a.currentAppState = AppStateStart
+			a.availRooms = []Room{}
+		}
 
 	case AppStateDrawStart:
 		if rl.IsKeyPressed(rl.KeyM) {
@@ -510,6 +519,13 @@ func (a *App) OnMPressed() {
 				a.currentRoom = Room{}
 				a.mu.Unlock()
 
+				a.currentAppState = AppStateStart
+			}
+			if a.isServerBooted && !a.isRoomHost {
+				fmt.Println("Closing server connection...")
+				a.ws.Close()
+				a.currentRoom = Room{}
+				a.isServerBooted = false
 				a.currentAppState = AppStateStart
 			}
 		}
@@ -710,6 +726,7 @@ func (a *App) JoinWsServer(roomAddr string) {
 		_, msg, err := c.ReadMessage()
 		if err != nil {
 			fmt.Printf("failed to read messages from ws: %v\n", err)
+			break
 		}
 
 		elemSize := binary.Size(rl.Vector2{})
